@@ -1,0 +1,148 @@
+<?php
+
+
+/**
+ * Implements hook_permission().
+ */
+function oa_messages_default_permission() {
+  return array(
+    'administer oa messages defaults' => array(
+      'title' => t('Administer OA Messages Defaults'),
+      'description' => t('Allows user to set global OA Messages default settings. Grant with extreme caution.'),
+      'restrict access' => TRUE,
+    ),  
+  );
+
+}
+
+/*
+ * Add default space specific options to the default notifications admin page
+ *   
+ */
+function oa_messages_default_form_message_subscribe_admin_settings_alter(&$form, &$form_state, $form_id) {
+  module_load_include('inc', 'oa_messages', 'oa_messages.admin');
+
+  $form['message_subscribe_default_notifiers']['#description'] = t("Which message notifiers will be added to every new space's defaults");
+  $form['message_subscribe_default_notifiers']['#weight'] = -10;
+  
+  //generate the defaut form for the admin since that user has access to every space
+  //strip the messages data so we don't actually use the admin's defaults
+  $account = user_load(1);
+  unset($account->data['oa_messages']);
+  $default_form = $default_state = array();
+  oa_messages_oa_user_settings_form_alter($default_form, $default_state, $account);
+  unset($default_form['oa_messages']['message_notifications']['filter']);
+  unset($default_form['oa_messages']['message_notifications']['all_notifications']);
+  unset($default_form['oa_messages']['message_notifications']['all_notifications_submit']);
+  unset($default_form['oa_messages']['message_notifications']['header']);
+  
+  //create a default message type for new spaces
+  $child_keys = element_children($default_form['oa_messages']['message_notifications']['all_spaces']);
+  $form['message_subscribe_default_message_type'] = $default_form['oa_messages']['message_notifications']['all_spaces'][$child_keys[0]]['message_container']['messages'];
+  $default_message_type = variable_get('message_subscribe_default_message_type', $form['message_subscribe_default_message_type']['#default_value']);
+  $form['message_subscribe_default_message_type']['#default_value'] = $default_message_type;
+  $form['message_subscribe_default_message_type']['#title'] = t('Default Message Types');
+  $form['message_subscribe_default_message_type']['#description'] = t("Which message type's will be added to every new space's defaults");
+  $form['message_subscribe_default_message_type']['#weight'] = -9;        
+  
+  foreach ($child_keys as $key) {
+    $space = &$default_form['oa_messages']['message_notifications']['all_spaces'][$key];
+    $space['checkbox']['#type'] = 'markup';
+    $space['checkbox']['#markup'] = $space['checkbox']['#title'];
+    unset($space['checkbox']['#title']);
+    
+    $space['message_container']['messages']['#default_value'] = variable_get("oa_messages_default_messages_$key", $default_message_type);
+    $space['message_container']["oa_messages_default_messages_$key"] = $space['message_container']['messages'];
+    unset($space['message_container']['messages']);    
+    
+    $space['methods']['#default_value'] = variable_get("oa_messages_default_methods_$key", $space['methods']['#default_value']);
+    $space["oa_messages_default_methods_$key"] = $space['methods'];
+    unset($space['methods']);
+  }
+  
+  $form['oa_message_default'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Space Defaults'), 
+    'message_notifications_default' => $default_form['oa_messages']['message_notifications'], 
+    '#weight' => -8,  
+  );
+ 
+}
+
+
+/**
+ * Implements hook_oa_user_settings_form_alter().
+ *  If user has not saved their user notifications then make sure that the 
+ *   space specific defaults are set on users notifications page
+ */
+function oa_messages_default_oa_user_settings_form_alter(&$form, &$form_state, $user) {
+ 
+  foreach (element_children($form['oa_messages']['message_notifications']['all_spaces']) as $key) {
+    //only update spaces the user has not already saved personal settings for
+    if (isset($user->data['oa_messages']['message_notifications'][$key])) continue;
+    
+    $space = &$form['oa_messages']['message_notifications']['all_spaces'][$key];
+
+    $default_message_type = variable_get('message_subscribe_default_message_type', $space['message_container']['messages']['#default_value']);
+    $space['message_container']['messages']['#default_value'] = variable_get("oa_messages_default_messages_$key", $default_message_type);   
+
+    $space['methods']['#default_value'] = variable_get("oa_messages_default_methods_$key", $space['methods']['#default_value']);
+  }    
+
+}
+
+/*
+ * Implements hook notifications_users_alter()
+ *   If user has never saved their defaut notifications then make sure the 
+ *   space specific default settings are used when sending messages to this user
+ * 
+ */
+function oa_messages_default_notifications_users_alter(&$bucket, &$node) {
+  $my_data = &drupal_static(__FUNCTION__);
+  $root = array(
+    //'email_type' => "1",
+    'message_notifications' => array(),  
+  );
+  foreach ($bucket as &$account) {
+    if (!isset($my_data[$account->uid])) {
+      //does user have their own notifications settings
+      if (isset($account->data['oa_messages'])) {
+        //set this as the default
+        $my_data[$account->uid] = $account->data['oa_messages'];
+      }
+      else {
+        $my_data[$account->uid] = $root;
+      }
+
+      //walk the list of spaces to see if any new spaces have been added
+      // add the space specific default settings
+      $spaces = oa_core_get_groups_by_user_access($account);
+
+      if (!empty($spaces)) {
+        foreach ($spaces as $space) {
+          //add defaut if the user has not saved custom settings for this space
+          if (!isset($my_data[$account->uid]['message_notifications'][$space->nid])) {
+            $my_data[$account->uid]['message_notifications'][$space->nid] = oa_messages_default_create_messages_notifications_defaut($space->nid);
+          } 
+        }
+      }      
+    }
+    
+    $account->data['oa_messages'] = $my_data[$account->uid];
+    
+  } 
+}
+
+/*
+ * Heper function to build the user data array with default space notification settings
+ */
+function oa_messages_default_create_messages_notifications_defaut($nid) {
+  $my_data = &drupal_static(__FUNCTION__);
+  if (!isset($my_data[$nid])) {
+    $my_data[$nid] = array(
+      'methods' => variable_get("oa_messages_default_methods_$nid", variable_get('message_subscribe_default_notifiers')),
+      'messages' => variable_get("oa_messages_default_messages_$nid", variable_get('message_subscribe_default_message_type')),
+    );
+  }
+  return $my_data[$nid];
+}

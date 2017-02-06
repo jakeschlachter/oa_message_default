@@ -1,0 +1,8 @@
+name = OA Messages Default
+description = OA messages default settings for new users
+
+core = 7.x
+
+files[] = oa_messages_default.module
+
+dependencies[] = oa_messages
